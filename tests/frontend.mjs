@@ -14,8 +14,8 @@ async function fixture({missing=false}={}) {
   window.BG_PHOTOS={latte:'data:image/jpeg;base64,',tea:'data:image/jpeg;base64,',cold:'data:image/jpeg;base64,'};
   const state={session:null,role:false,requests:[],saved:[],failed:false,guestSignins:0};
   const client={
-    from(table){const query={select(){return this},order(){return this},eq(){return this},single(){return this},in(){return this},limit(){return this},
-      then(resolve,reject){return Promise.resolve(missing?{error:{message:'Missing table'}}:{data:table==='products'?catalog:table==='store_settings'?settings:state.saved,error:null}).then(resolve,reject)}};return query;},
+    from(table){let status=null,statuses=null,first=0,last=Infinity,after=null,before=null;const query={select(){return this},order(){return this},eq(key,value){if(key==='status')status=value;return this},single(){return this},in(key,values){if(key==='status')statuses=values;return this},limit(){return this},range(a,b){first=a;last=b;return this},gte(key,value){after=value;return this},lt(key,value){before=value;return this},
+      then(resolve,reject){let rows=state.saved.filter(o=>(!status||o.status===status)&&(!statuses||statuses.includes(o.status))&&(!after||o.created_at>=after)&&(!before||o.created_at<before));return Promise.resolve(missing?{error:{message:'Missing table'}}:{data:table==='products'?catalog:table==='store_settings'?settings:rows.slice(first,last+1),count:rows.length,error:null}).then(resolve,reject)}};return query;},
     auth:{onAuthStateChange(){},async getSession(){return {data:{session:state.session}}},
       async signInAnonymously(){state.guestSignins++;state.session={user:{is_anonymous:true}};return {data:{session:state.session}}},
       async signInWithPassword(){state.session={user:{is_anonymous:false,email:'staff@example.com'}};state.role=true;return {}},
@@ -25,7 +25,7 @@ async function fixture({missing=false}={}) {
       if(name==='place_order'){
         state.requests.push(structuredClone(args));
         if(state.failed){state.failed=false;return {error:{message:'Network interrupted'}};}
-        const row={id:'saved-order',order_number:1001,pickup_at:args.p_pickup_at,total_cents:900,is_test:true,customer_name:args.p_customer_name,status:'new',order_items:[{quantity:2,style:'Hot',product_name:'Latte'}]};
+        const row={id:'saved-order',order_number:1001,created_at:'2026-10-02T03:00:00.000Z',pickup_at:args.p_pickup_at,total_cents:900,is_test:true,customer_name:args.p_customer_name,status:'new',order_items:[{quantity:2,style:'Hot',product_name:'Latte'}]};
         state.saved=[row];return {data:row};
       }
       if(name==='staff_set_order_status'){state.saved[0].status=args.p_status;return {};}
@@ -35,7 +35,7 @@ async function fixture({missing=false}={}) {
   };
   window.supabase={createClient(){return client}};
   vm.runInContext(code,vm.createContext({document,window,crypto:{randomUUID},Intl,Date,console,setInterval(){},setTimeout(fn){queueMicrotask(fn)}}));
-  const flush=async()=>{for(let i=0;i<25;i++)await Promise.resolve();};
+  const flush=async()=>{for(let i=0;i<80;i++)await Promise.resolve();};
   const q=s=>document.querySelector(s);
   const click=async s=>{const b=q(s);assert.ok(b,`Missing ${s}`);b.dispatchEvent(new window.Event('click',{bubbles:true}));await flush();};
   await flush();
@@ -70,8 +70,28 @@ assert.equal(f.q('#bg-staff-tools').hidden,false);
 assert.equal(f.q('#bg-password').value,'','Password cleared after login');
 assert.equal(f.q('#bg-new').querySelectorAll('.ticket').length,1);
 assert.equal(f.q('#bg-new').querySelectorAll('img').length,0,'Customer names are rendered as text');
+assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,1);
+assert.equal(f.q('#bg-history-body').querySelectorAll('img').length,0,'Names are safe in history too');
+assert.match(f.q('#bg-history-message').textContent,/1–1 of 1/);
 await f.click('[data-advance="saved-order"][data-status="preparing"]');
 assert.equal(f.q('#bg-preparing').querySelectorAll('.ticket').length,1);
+await f.click('[data-advance="saved-order"][data-status="ready"]');
+await f.click('[data-advance="saved-order"][data-status="collected"]');
+assert.equal(f.q('#bg-ready').querySelectorAll('.ticket').length,0);
+assert.match(f.q('#bg-history-body').textContent,/Collected/,'Completed orders remain in history');
+for(let i=0;i<25;i++)f.state.saved.push({...f.state.saved[0],id:'history-'+i,order_number:1100+i,status:i===0?'cancelled':'collected',created_at:'2026-10-01T17:00:00.000Z'});
+await f.click('#bg-refresh');
+assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,20);
+assert.match(f.q('#bg-history-message').textContent,/1–20 of 26/);
+await f.click('#bg-history-next');assert.match(f.q('#bg-history-message').textContent,/21–26 of 26/);
+assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,6);
+const change=async(selector,value)=>{const control=f.q(selector);if(control.tagName==='SELECT'){for(const opt of control.querySelectorAll('option'))opt.selected=opt.value===value;}else control.value=value;control.dispatchEvent(new f.window.Event('change',{bubbles:true}));await f.flush();};
+await change('#bg-history-status','cancelled');
+assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,1);assert.match(f.q('#bg-history-body').textContent,/Cancelled/);
+await change('#bg-history-date','2026-10-02');assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,1,'Singapore date includes Oct 1 17:00 UTC');
+await change('#bg-history-date','2026-10-01');assert.equal(f.q('#bg-history-body').querySelectorAll('tr').length,0);
+assert.match(f.q('#bg-history-message').textContent,/No orders match/);
 await f.click('#bg-signout');assert.equal(f.q('#bg-staff-tools').hidden,true);
 assert.equal(f.q('#bg-new').textContent,'','Private data is removed on sign-out');
-console.log('PASS: unavailable setup, sold-out menu, cart totals, validation, authenticated guest checkout, idempotent retries, saved receipt, staff sign-in, XSS-safe rendering, status changes and logout');
+assert.equal(f.q('#bg-history-body').textContent,'','History is removed on sign-out');
+console.log('PASS: storefront and checkout, staff-only queue/history, completed/cancelled history, pagination, status/date filters, Singapore dates, XSS-safe rendering and sign-out privacy');

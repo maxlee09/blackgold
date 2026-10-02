@@ -25,6 +25,8 @@
   let client, items = previewMenu, cart = [], settings = null, category = 'all';
   let storefrontReady = false, isStaff = false, staffBusy = false, submitting = false;
   let pendingRequest = null, view = 'customer', authCheck = 0;
+  let orderGeneration = 0, historyGeneration = 0, historyPage = 0, historyCount = 0;
+  const historyPageSize = 20;
   const message = (selector, text, error = false) => {
     const node = q(selector);
     node.textContent = text;
@@ -174,9 +176,13 @@
     if (next === 'staff') checkStaff();
   }
   function clearStaff() {
+    orderGeneration++; historyGeneration++; staffBusy = false;
     isStaff = false; q('#bg-staff-tools').hidden = true; q('#bg-login-panel').hidden = false;
     ['new','preparing','ready'].forEach(status => q('#bg-'+status).replaceChildren());
     q('#bg-inventory').replaceChildren();
+    q('#bg-history-body').replaceChildren();
+    message('#bg-history-message','');
+    historyPage=0; historyCount=0;
   }
   async function checkStaff() {
     if (!client) return;
@@ -209,13 +215,16 @@
   async function refreshOrders() {
     if (!client || !isStaff || staffBusy) return;
     staffBusy = true;
+    const generation = ++orderGeneration;
     try {
       const {data:allowed,error:accessError}=await client.rpc('is_staff');
+      if (!isStaff || generation !== orderGeneration) return;
       if (accessError || allowed!==true) {clearStaff(); return;}
       const {data,error} = await client.from('orders')
         .select('id,order_number,customer_name,pickup_at,total_cents,status,is_test,order_items(product_name,style,quantity)')
         .in('status',['new','preparing','ready']).order('pickup_at').limit(200);
       if(error) throw error;
+      if (!isStaff || generation !== orderGeneration) return;
       ['new','preparing','ready'].forEach(status => {
         const lane=q('#bg-'+status); lane.replaceChildren();
         const orders=data.filter(order=>order.status===status);
@@ -234,8 +243,58 @@
         });
       });
       message('#bg-staff-message',`Updated ${new Intl.DateTimeFormat('en-SG',{timeZone:'Asia/Singapore',hour:'numeric',minute:'2-digit',second:'2-digit'}).format(new Date())} · refreshes every 10 seconds`);
-    } catch {message('#bg-staff-message','Couldn’t refresh orders. Your last view may be out of date.',true);}
-    finally {staffBusy=false;}
+      await refreshHistory();
+    } catch {if(isStaff && generation===orderGeneration)message('#bg-staff-message','Couldn’t refresh orders. Your last view may be out of date.',true);}
+    finally {if(generation===orderGeneration)staffBusy=false;}
+  }
+  async function refreshHistory() {
+    if (!client || !isStaff) return;
+    const generation=++historyGeneration;
+    q('#bg-history').setAttribute('aria-busy','true');
+    q('#bg-history-prev').disabled=true; q('#bg-history-next').disabled=true;
+    try {
+      const {data:allowed,error:accessError}=await client.rpc('is_staff');
+      if (!isStaff || generation!==historyGeneration) return;
+      if (accessError || allowed!==true) {clearStaff(); return;}
+      let query=client.from('orders').select('id,order_number,customer_name,created_at,pickup_at,total_cents,status,is_test,order_items(product_name,style,quantity)',{count:'exact'})
+        .order('created_at',{ascending:false}).order('order_number',{ascending:false});
+      const status=q('#bg-history-status').value;
+      if (status && status!=='all') query=query.eq('status',status);
+      const date=q('#bg-history-date').value;
+      if (date) {
+        const start=new Date(`${date}T00:00:00+08:00`);
+        if (!Number.isFinite(start.getTime())) throw new Error('Invalid date');
+        query=query.gte('created_at',start.toISOString()).lt('created_at',new Date(start.getTime()+86400000).toISOString());
+      }
+      const {data,count,error}=await query.range(historyPage*historyPageSize,(historyPage+1)*historyPageSize-1);
+      if (!isStaff || generation!==historyGeneration) return;
+      if(error) throw error;
+      historyCount=count??data.length;
+      if(historyPage>0 && !data.length) {historyPage=Math.max(0,Math.ceil(historyCount/historyPageSize)-1);await refreshHistory();return;}
+      const body=q('#bg-history-body');body.replaceChildren();
+      const labels={new:'New',preparing:'Preparing',ready:'Ready',collected:'Collected',cancelled:'Cancelled'};
+      data.forEach(order=>{
+        const row=el('tr');
+        const cell=(label)=>{const td=el('td');td.dataset.label=label;row.append(td);return td;};
+        const ref=cell('Order');ref.append(el('strong',`BG-${order.order_number}`),el('div',pickupLabel(order.created_at),'muted'));
+        if(order.is_test)ref.append(el('small','Test order','history-test'));
+        cell('Customer').append(el('span',order.customer_name));
+        const drinks=cell('Drinks');drinks.className='history-drinks';
+        order.order_items.forEach(line=>drinks.append(el('div',`${line.quantity} × ${line.style} ${line.product_name}`)));
+        cell('Pickup').textContent=pickupLabel(order.pickup_at);
+        const total=cell('Total');total.textContent=money(order.total_cents);total.className='history-total';
+        const badge=el('span',labels[order.status]||order.status,'history-status');badge.dataset.status=order.status;cell('Status').append(badge);
+        body.append(row);
+      });
+      message('#bg-history-message',historyCount?`${historyPage*historyPageSize+1}–${Math.min((historyPage+1)*historyPageSize,historyCount)} of ${historyCount} orders · newest first`:'No orders match these filters.');
+      q('#bg-history-prev').disabled=historyPage===0;
+      q('#bg-history-next').disabled=(historyPage+1)*historyPageSize>=historyCount;
+    }catch {
+      if(isStaff && generation===historyGeneration){
+        q('#bg-history-body').replaceChildren();
+        message('#bg-history-message','Couldn’t load order history. Click Refresh to try again.',true);
+      }
+    }finally {if(generation===historyGeneration)q('#bg-history').setAttribute('aria-busy','false');}
   }
   async function setStatus(button) {
     if (!isStaff || button.disabled) return;
@@ -291,6 +350,8 @@
     if(b.id==='bg-refresh') {await loadStorefront();renderInventory();await refreshOrders();}
     if(b.id==='bg-signout') {await client.auth.signOut();clearStaff();q('#bg-password').value='';message('#bg-login-message','Signed out.');}
     if(b.dataset.advance) await setStatus(b);
+    if(b.id==='bg-history-prev') {historyPage=Math.max(0,historyPage-1);await refreshHistory();}
+    if(b.id==='bg-history-next') {historyPage++;await refreshHistory();}
     if(b.id==='bg-pause') {
       b.disabled=true;
       try {
@@ -301,6 +362,7 @@
     }
   });
   q('#bg-login-form').addEventListener('submit',login);
+  ['#bg-history-status','#bg-history-date'].forEach(selector=>q(selector).addEventListener('change',()=>{historyPage=0;refreshHistory();}));
   q('#bg-name').addEventListener('input',invalidateCheckout);
   q('#bg-time').addEventListener('change',invalidateCheckout);
   renderProducts(); renderCart();
