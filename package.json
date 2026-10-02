@@ -1,0 +1,7 @@
+{
+  "name": "blackgold-ordering-pilot",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node tests/database.mjs && node tests/frontend.mjs" },
+  "devDependencies": { "@electric-sql/pglite": "0.5.8", "linkedom": "0.18.13" }
+}
